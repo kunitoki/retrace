@@ -1,0 +1,144 @@
+name: Coverage
+
+on:
+  push:
+    paths:
+      - ".gitmodules"
+      - "CMakeLists.txt"
+      - "codecov.yml"
+      - "**/workflows/coverage.yml"
+      - "cmake/**"
+      - "source/**"
+      - "data/**"
+      - "tests/**"
+      - "yup"
+    branches:
+      - "**"
+  pull_request:
+    paths:
+      - ".gitmodules"
+      - "CMakeLists.txt"
+      - "codecov.yml"
+      - "**/workflows/coverage.yml"
+      - "cmake/**"
+      - "source/**"
+      - "data/**"
+      - "tests/**"
+      - "yup"
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  INSTALL_DEPS: >-
+    libasound2-dev libjack-jackd2-dev ladspa-sdk libcurl4-openssl-dev libfreetype6-dev
+    libx11-dev libxcomposite-dev libxcursor-dev libxcursor-dev libxext-dev libxi-dev libxinerama-dev
+    libxrandr-dev libxrender-dev libxfixes-dev libxss-dev libxtst-dev libxkbcommon-dev
+    libglu1-mesa-dev libegl1-mesa-dev mesa-common-dev libgl1-mesa-dri mesa-utils xvfb glibc-tools lcov
+  LIBGL_ALWAYS_SOFTWARE: "1"
+  GALLIUM_DRIVER: "llvmpipe"
+  IGNORE_ERRORS: "mismatch,gcov,source,negative,unused,empty,format,corrupt"
+
+jobs:
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        submodules: 'true'
+
+    - name: Read project name
+      shell: bash
+      run: echo "PROJECT_NAME=$(sed -n -E 's/^[[:space:]]*set[[:space:]]*\([[:space:]]*PROJECT_NAME[[:space:]]+"([^"]*)".*/\1/p' CMakeLists.txt | head -n1)" >> "$GITHUB_ENV"
+
+    - name: Install Dependencies
+      run: sudo apt-get update && sudo apt-get install -y ${INSTALL_DEPS}
+
+    - name: Configure CMake with Coverage
+      run: |
+        cmake ${{ github.workspace }} -B ${{ runner.workspace }}/build \
+          -G "Ninja Multi-Config" \
+          -DBUILD_TESTS=ON \
+          -DENABLE_COVERAGE=ON \
+          -DCMAKE_BUILD_TYPE=Debug
+
+    - name: Build Tests
+      working-directory: ${{ runner.workspace }}/build
+      run: cmake --build . --config Debug --target ${{ env.PROJECT_NAME }}_tests
+
+    - name: Clean Coverage Data
+      working-directory: ${{ runner.workspace }}/build/tests/Debug
+      run: |
+        find "${{ runner.workspace }}/build" -name "*.gcda" -delete
+        lcov --directory "${{ runner.workspace }}/build" --zerocounters 2>/dev/null || true
+
+    - name: Run Tests
+      working-directory: ${{ runner.workspace }}/build/tests/Debug
+      run: |
+        # Run tests and generate JUnit XML report
+        xvfb-run -a ./${{ env.PROJECT_NAME }}_tests --gtest_output=xml:test_results.xml || true
+
+    - name: Generate Coverage Report
+      working-directory: ${{ runner.workspace }}/build/tests/Debug
+      run: |
+        mkdir -p coverage
+
+        # Capture coverage data (the .gcda files live next to the object files
+        # under the build tree, not under tests/Debug).
+        lcov --directory "${{ runner.workspace }}/build" --capture \
+          --output-file coverage/coverage.info \
+          --ignore-errors ${IGNORE_ERRORS}
+
+        # Remove unwanted files from coverage
+        lcov --remove coverage/coverage.info \
+          "*/tests/*" \
+          "*/build/*" \
+          "*/usr/*" \
+          "*/opt/*" \
+          "*/yup/*" \
+          --output-file coverage/coverage_final.info \
+          --ignore-errors ${IGNORE_ERRORS}
+
+        # Display coverage summary
+        lcov --list coverage/coverage_final.info
+
+    - name: Generate HTML Coverage Report
+      working-directory: ${{ runner.workspace }}/build/tests/Debug
+      run: |
+        genhtml coverage/coverage_final.info \
+          --output-directory coverage/html \
+          --title "${{ env.PROJECT_NAME }} Coverage Report" \
+          --legend \
+          --show-details
+
+    - name: Upload Coverage to Codecov
+      if: ${{ env.CODECOV_TOKEN != '' }}
+      uses: codecov/codecov-action@v7
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        file: ${{ runner.workspace }}/build/tests/Debug/coverage/coverage_final.info
+        name: ${{ env.PROJECT_NAME }}-coverage
+        fail_ci_if_error: false
+        verbose: true
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v7
+      if: always()
+      with:
+        name: test-results
+        path: ${{ runner.workspace }}/build/tests/Debug/test_results.xml
+
+    - name: Upload Coverage Reports
+      uses: actions/upload-artifact@v7
+      if: always()
+      with:
+        name: coverage-reports
+        path: ${{ runner.workspace }}/build/tests/Debug/coverage/html

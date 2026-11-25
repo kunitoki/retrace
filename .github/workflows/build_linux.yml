@@ -1,0 +1,89 @@
+name: Linux
+
+on:
+  workflow_call:
+  push:
+    paths:
+      - ".gitmodules"
+      - "CMakeLists.txt"
+      - "**/workflows/build_linux.yml"
+      - "cmake/**"
+      - "source/**"
+      - "data/**"
+      - "tests/**"
+      - "benchmarks/**"
+      - "packaging/**"
+      - "yup"
+      - "VERSION"
+    branches:
+      - "**"
+
+concurrency:
+  group: build_linux-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  INSTALL_DEPS: >-
+    libasound2-dev libjack-jackd2-dev ladspa-sdk libcurl4-openssl-dev libfreetype6-dev
+    libx11-dev libxcomposite-dev libxcursor-dev libxcursor-dev libxext-dev libxi-dev libxinerama-dev
+    libxrandr-dev libxrender-dev libxfixes-dev libxss-dev libxtst-dev libxkbcommon-dev
+    libglu1-mesa-dev libegl1-mesa-dev mesa-common-dev libgl1-mesa-dri mesa-utils xvfb glibc-tools
+  LIBGL_ALWAYS_SOFTWARE: "1"
+  GALLIUM_DRIVER: "llvmpipe"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Install Dependencies
+      run: sudo apt-get update && sudo apt-get install -y ${INSTALL_DEPS}
+
+    - name: Checkout
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        submodules: 'true'
+
+    - name: Read project name
+      shell: bash
+      run: echo "PROJECT_NAME=$(sed -n -E 's/^[[:space:]]*set[[:space:]]*\([[:space:]]*PROJECT_NAME[[:space:]]+"([^"]*)".*/\1/p' CMakeLists.txt | head -n1)" >> "$GITHUB_ENV"
+
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.11
+
+    - name: Configure
+      run: cmake ${{ github.workspace }} -G "Ninja Multi-Config" -B ${{ runner.workspace }}/build -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+    - name: Build Debug
+      run: cmake --build ${{ runner.workspace }}/build --config Debug --target ${{ env.PROJECT_NAME }}
+
+    - name: Build Release
+      run: cmake --build ${{ runner.workspace }}/build --config Release --target ${{ env.PROJECT_NAME }}
+
+    - name: Test
+      run: |
+        cmake --build ${{ runner.workspace }}/build --config Debug --target ${{ env.PROJECT_NAME }}_tests
+        xvfb-run -a ctest --test-dir ${{ runner.workspace }}/build/tests -C Debug --output-on-failure
+
+    - name: Package
+      id: package
+      run: |
+        BUILD_DIR="${{ runner.workspace }}/build" bash packaging/linux/build_archive.sh Release
+        BUILD_DIR="${{ runner.workspace }}/build" bash packaging/linux/build_deb.sh Release
+        echo "archive=$(basename "$(ls dist/*.tar.gz | head -n1)")" >> "$GITHUB_OUTPUT"
+        echo "deb=$(basename "$(ls dist/*.deb | head -n1)")" >> "$GITHUB_OUTPUT"
+
+    - name: Upload archive
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.package.outputs.archive }}
+        path: dist/*.tar.gz
+        if-no-files-found: error
+
+    - name: Upload Debian package
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.package.outputs.deb }}
+        path: dist/*.deb
+        if-no-files-found: error

@@ -1,0 +1,98 @@
+name: Windows
+
+on:
+  workflow_call:
+  push:
+    paths:
+      - ".gitmodules"
+      - "CMakeLists.txt"
+      - "**/workflows/build_windows.yml"
+      - "cmake/**"
+      - "source/**"
+      - "data/**"
+      - "tests/**"
+      - "benchmarks/**"
+      - "packaging/**"
+      - "yup"
+      - "VERSION"
+    branches:
+      - "**"
+
+concurrency:
+  group: build_windows-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Optional Azure Trusted Signing of the installer. Leave the secrets unset to
+  # produce an unsigned installer (the default). See packaging/README.md.
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+  AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+  AZURE_SIGNING_CERT_PROFILE: ${{ secrets.AZURE_SIGNING_CERT_PROFILE }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        submodules: 'true'
+
+    - name: Read project name
+      shell: bash
+      run: echo "PROJECT_NAME=$(sed -n -E 's/^[[:space:]]*set[[:space:]]*\([[:space:]]*PROJECT_NAME[[:space:]]+"([^"]*)".*/\1/p' CMakeLists.txt | head -n1)" >> "$GITHUB_ENV"
+
+    - name: Configure
+      run: cmake ${{ github.workspace }} -B ${{ runner.workspace }}/build
+
+    - name: Build Debug
+      run: cmake --build ${{ runner.workspace }}/build --config Debug --target ${{ env.PROJECT_NAME }}
+
+    - name: Build Release
+      run: cmake --build ${{ runner.workspace }}/build --config Release --target ${{ env.PROJECT_NAME }}
+
+    - name: Test
+      run: |
+        cmake --build ${{ runner.workspace }}/build --config Debug --target ${{ env.PROJECT_NAME }}_tests
+        ctest --test-dir ${{ runner.workspace }}/build/tests -C Debug --output-on-failure
+
+    - name: Install Inno Setup
+      run: choco install innosetup --no-progress -y
+
+    - name: Package
+      id: package
+      shell: pwsh
+      run: |
+        packaging/windows/build_installer.ps1 `
+          -Config Release `
+          -BuildDir "${{ runner.workspace }}/build" `
+          -Iscc "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+        $file = (Get-ChildItem dist/*.exe | Select-Object -First 1).Name
+        "file=$file" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+    - name: Sign installer (Azure Trusted Signing)
+      if: env.AZURE_TENANT_ID != ''
+      uses: azure/trusted-signing-action@v2
+      with:
+        azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
+        azure-client-id: ${{ env.AZURE_CLIENT_ID }}
+        azure-client-secret: ${{ env.AZURE_CLIENT_SECRET }}
+        endpoint: ${{ env.AZURE_SIGNING_ENDPOINT }}
+        trusted-signing-account-name: ${{ env.AZURE_SIGNING_ACCOUNT }}
+        certificate-profile-name: ${{ env.AZURE_SIGNING_CERT_PROFILE }}
+        files-folder: ${{ github.workspace }}/dist
+        files-folder-filter: exe
+        file-digest: SHA256
+        timestamp-rfc3161: http://timestamp.acs.microsoft.com
+        timestamp-digest: SHA256
+
+    - name: Upload installer
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.package.outputs.file }}
+        path: dist/*.exe
+        if-no-files-found: error

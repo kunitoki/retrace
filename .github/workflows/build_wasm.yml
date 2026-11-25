@@ -1,0 +1,81 @@
+name: Wasm
+
+on:
+  workflow_call:
+  push:
+    paths:
+      - ".gitmodules"
+      - "CMakeLists.txt"
+      - "**/workflows/build_wasm.yml"
+      - "cmake/**"
+      - "source/**"
+      - "data/**"
+      - "tests/**"
+      - "benchmarks/**"
+      - "packaging/**"
+      - "yup"
+      - "VERSION"
+    branches:
+      - "**"
+
+concurrency:
+  group: build_wasm-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  INSTALL_DEPS: >-
+    libasound2-dev libjack-jackd2-dev ladspa-sdk libcurl4-openssl-dev libfreetype6-dev
+    libx11-dev libxcomposite-dev libxcursor-dev libxcursor-dev libxext-dev libxi-dev libxinerama-dev
+    libxrandr-dev libxrender-dev libglu1-mesa-dev mesa-common-dev
+  EM_VERSION: 4.0.21
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install Dependencies
+      run: sudo apt-get update && sudo apt-get install -y ${INSTALL_DEPS}
+
+    - name: Checkout
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        submodules: 'true'
+
+    - name: Read project name
+      shell: bash
+      run: echo "PROJECT_NAME=$(sed -n -E 's/^[[:space:]]*set[[:space:]]*\([[:space:]]*PROJECT_NAME[[:space:]]+"([^"]*)".*/\1/p' CMakeLists.txt | head -n1)" >> "$GITHUB_ENV"
+
+    - name: Setup emsdk
+      uses: mymindstorm/setup-emsdk@v16
+      with:
+        version: ${{ env.EM_VERSION }}
+
+    - name: Configure
+      run: emcmake cmake ${{ github.workspace }} -G "Ninja Multi-Config" -B ${{ runner.workspace }}/build
+
+    - name: Warm up Emscripten cache
+      run: |
+        emcc -c -x c++ /dev/null -o /dev/null -pthread || true
+        embuilder build sdl2 --pic
+
+    - name: Build Debug
+      run: |
+        cmake --build ${{ runner.workspace }}/build --config Debug --target ${{ env.PROJECT_NAME }}
+
+    - name: Build Release
+      run: |
+        cmake --build ${{ runner.workspace }}/build --config Release --target ${{ env.PROJECT_NAME }}
+
+    - name: Package
+      id: package
+      run: |
+        BUILD_DIR="${{ runner.workspace }}/build" bash packaging/wasm/build_archive.sh Release
+        echo "archive=$(basename "$(ls dist/*-wasm.tar.gz | head -n1)")" >> "$GITHUB_OUTPUT"
+
+    - name: Upload WASM archive
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.package.outputs.archive }}
+        path: dist/*-wasm.tar.gz
+        if-no-files-found: error

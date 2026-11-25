@@ -1,0 +1,86 @@
+name: Android
+
+# See https://medium.com/@dcostalloyd90/automating-android-builds-with-github-actions-a-step-by-step-guide-2a02a54f59cd
+
+on:
+  push:
+    paths:
+      - ".gitmodules"
+      - "CMakeLists.txt"
+      - "**/workflows/build_android.yml"
+      - "cmake/**"
+      - "source/**"
+      - "data/**"
+      - "packaging/**"
+      - "yup"
+      - "VERSION"
+    branches:
+      - "**"
+  workflow_call:
+
+concurrency:
+  group: build_android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: 17
+  JAVA_DISTRIBUTION: 'temurin'
+  NDK_VERSION: r27c
+  ANDROID_CMAKE_VERSION: 3.31.6
+  INSTALL_DEPS: >-
+    libasound2-dev libjack-jackd2-dev ladspa-sdk libcurl4-openssl-dev libfreetype6-dev
+    libx11-dev libxcomposite-dev libxcursor-dev libxcursor-dev libxext-dev libxi-dev libxinerama-dev
+    libxrandr-dev libxrender-dev libxfixes-dev libxss-dev libxtst-dev libxkbcommon-dev
+    libglu1-mesa-dev libegl1-mesa-dev mesa-common-dev libgl1-mesa-dri mesa-utils xvfb glibc-tools
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y ${INSTALL_DEPS}
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: ${{env.JAVA_DISTRIBUTION}}
+          java-version: ${{env.JAVA_VERSION}}
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools cmake;${{env.ANDROID_CMAKE_VERSION}}
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{env.NDK_VERSION}}
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: 'true'
+
+      - name: Configure
+        run: cmake ${{ github.workspace }} -G "Ninja Multi-Config" -B ${{ runner.workspace }}/build -DYUP_TARGET_ANDROID=ON -DYUP_ANDROID_CMAKE_VERSION=${{ env.ANDROID_CMAKE_VERSION }}
+
+      - name: Build Debug
+        working-directory: ${{ runner.workspace }}/build
+        run: ./gradlew assembleDebug
+
+      - name: Build Release
+        working-directory: ${{ runner.workspace }}/build
+        run: ./gradlew assemble
+
+      - name: Package
+        id: package
+        run: |
+          BUILD_DIR="${{ runner.workspace }}/build" bash packaging/android/build_apk.sh Release
+          echo "apk=$(basename "$(ls dist/*-android.apk | head -n1)")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.apk }}
+          path: dist/*-android.apk
